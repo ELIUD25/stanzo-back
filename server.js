@@ -291,7 +291,8 @@ app.use(compression());
 
 // CORS Configuration
 app.use(cors({
-  origin: process.env.CLIENT_URL || 'http://localhost:3000',
+  // origin: process.env.CLIENT_URL || 'http://localhost:3000',
+  origin: process.env.CLIENT_URL || 'https://stanzo-front.vercel.app/',
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
 }));
@@ -2803,7 +2804,8 @@ const startServer = async () => {
       console.log('='.repeat(50));
       console.log(`📍 Port: ${PORT}`);
       console.log(`🔗 URL: http://localhost:${PORT}`);
-      console.log(`🌐 Client: ${process.env.CLIENT_URL || 'http://localhost:3000'}`);
+      // console.log(`🌐 Client: ${process.env.CLIENT_URL || 'http://localhost:3000'}`);
+      console.log(`🌐 Client: ${process.env.CLIENT_URL || 'https://stanzo-front.vercel.app/'}`); 
       console.log(`📊 Database: ${mongoose.connection.name}`);
       console.log(`📧 Email Service: ${emailTransporter ? 'Enabled' : 'Disabled'}`);
       console.log(`🔐 Authentication:`);
