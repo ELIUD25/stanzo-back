@@ -291,8 +291,8 @@ app.use(compression());
 
 // CORS Configuration
 app.use(cors({
-  // origin: process.env.CLIENT_URL || 'http://localhost:3000',
-  origin: process.env.CLIENT_URL || 'https://stanzo-front.vercel.app/',
+  origin: process.env.CLIENT_URL || 'http://localhost:3000',
+  // origin: process.env.CLIENT_URL || 'https://stanzo-front.vercel.app/',
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
 }));
@@ -1692,7 +1692,146 @@ app.get('/api/auth/me', (req, res) => {
     });
   }
 });
+// Enhanced Credits API Endpoints with proper delete functionality
+app.delete('/api/credits/:id', async (req, res) => {
+  try {
+    console.log('🗑️ Deleting credit record:', req.params.id);
+    
+    const credit = await models.Credit.findByIdAndDelete(req.params.id);
+    
+    if (!credit) {
+      return res.status(404).json({
+        success: false,
+        message: 'Credit record not found'
+      });
+    }
+    
+    console.log('✅ Credit record deleted successfully:', req.params.id);
+    
+    res.json({
+      success: true,
+      message: 'Credit record deleted successfully',
+      deletedId: req.params.id
+    });
+  } catch (error) {
+    console.error('❌ Error deleting credit record:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to delete credit record',
+      error: error.message
+    });
+  }
+});
 
+// Enhanced credit creation with shop and cashier data
+app.post('/api/credits', async (req, res) => {
+  try {
+    const creditData = req.body;
+    
+    console.log('💳 Creating credit record with data:', creditData);
+    
+    // Validate required fields
+    if (!creditData.customerName || !creditData.totalAmount || !creditData.dueDate) {
+      return res.status(400).json({
+        success: false,
+        message: 'Missing required fields: customerName, totalAmount, dueDate'
+      });
+    }
+
+    // Calculate balance due
+    creditData.balanceDue = creditData.totalAmount - (creditData.amountPaid || 0);
+    
+    // Set initial status
+    if (!creditData.status) {
+      if (creditData.balanceDue <= 0) {
+        creditData.status = 'paid';
+      } else if (creditData.amountPaid > 0) {
+        creditData.status = 'partially_paid';
+      } else {
+        creditData.status = 'pending';
+      }
+    }
+
+    const credit = new models.Credit(creditData);
+    await credit.save();
+
+    // Populate related data if available
+    if (creditData.transactionId) {
+      await credit.populate('transactionId');
+    }
+
+    console.log('✅ Credit record created successfully:', credit._id);
+
+    res.status(201).json({
+      success: true,
+      data: credit,
+      message: 'Credit record created successfully'
+    });
+  } catch (error) {
+    console.error('❌ Error creating credit record:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to create credit record',
+      error: error.message
+    });
+  }
+});
+
+// Enhanced credit update with shop and cashier assignment
+app.put('/api/credits/:id', async (req, res) => {
+  try {
+    const updateData = req.body;
+    
+    console.log('✏️ Updating credit record:', req.params.id, updateData);
+    
+    // Recalculate balance if amounts are updated
+    if (updateData.totalAmount !== undefined || updateData.amountPaid !== undefined) {
+      const existingCredit = await models.Credit.findById(req.params.id);
+      if (existingCredit) {
+        const totalAmount = updateData.totalAmount !== undefined ? updateData.totalAmount : existingCredit.totalAmount;
+        const amountPaid = updateData.amountPaid !== undefined ? updateData.amountPaid : existingCredit.amountPaid;
+        updateData.balanceDue = totalAmount - amountPaid;
+        
+        // Update status based on new amounts
+        if (updateData.balanceDue <= 0) {
+          updateData.status = 'paid';
+        } else if (amountPaid > 0) {
+          updateData.status = 'partially_paid';
+        } else {
+          updateData.status = 'pending';
+        }
+      }
+    }
+
+    const credit = await models.Credit.findByIdAndUpdate(
+      req.params.id,
+      { ...updateData, updatedAt: new Date() },
+      { new: true, runValidators: true }
+    ).populate('transactionId');
+    
+    if (!credit) {
+      return res.status(404).json({
+        success: false,
+        message: 'Credit record not found'
+      });
+    }
+    
+    console.log('✅ Credit record updated successfully:', req.params.id);
+    
+    res.json({
+      success: true,
+      data: credit,
+      message: 'Credit record updated successfully'
+    });
+  } catch (error) {
+    console.error('❌ Error updating credit record:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to update credit record',
+      error: error.message
+    });
+  }
+});
 // ==================== EXISTING API ROUTES (MAINTAINED) ====================
 
 // Products API
@@ -2804,8 +2943,8 @@ const startServer = async () => {
       console.log('='.repeat(50));
       console.log(`📍 Port: ${PORT}`);
       console.log(`🔗 URL: http://localhost:${PORT}`);
-      // console.log(`🌐 Client: ${process.env.CLIENT_URL || 'http://localhost:3000'}`);
-      console.log(`🌐 Client: ${process.env.CLIENT_URL || 'https://stanzo-front.vercel.app/'}`); 
+      console.log(`🌐 Client: ${process.env.CLIENT_URL || 'http://localhost:3000'}`);
+      // console.log(`🌐 Client: ${process.env.CLIENT_URL || 'https://stanzo-front.vercel.app/'}`); 
       console.log(`📊 Database: ${mongoose.connection.name}`);
       console.log(`📧 Email Service: ${emailTransporter ? 'Enabled' : 'Disabled'}`);
       console.log(`🔐 Authentication:`);
