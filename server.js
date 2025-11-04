@@ -100,7 +100,7 @@ const createModels = () => {
     updatedAt: { type: Date, default: Date.now }
   });
 
-  // Credit Schema (NEW - for credit transactions)
+  // Credit Schema (ENHANCED - for credit transactions with shop classification)
   const creditSchema = new mongoose.Schema({
     transactionId: { type: mongoose.Schema.Types.ObjectId, ref: 'Transaction', required: true },
     customerName: { type: String, required: true },
@@ -115,9 +115,15 @@ const createModels = () => {
       amount: Number,
       paymentDate: { type: Date, default: Date.now },
       paymentMethod: String,
-      recordedBy: String
+      recordedBy: String,
+      cashierName: String
     }],
     shop: String,
+    shopId: String,
+    shopName: String,
+    // NEW: Enhanced shop classification fields
+    creditShopName: String,
+    creditShopId: String,
     cashierId: String,
     cashierName: String,
     notes: String,
@@ -292,7 +298,6 @@ app.use(compression());
 // CORS Configuration
 app.use(cors({
   origin: process.env.CLIENT_URL || 'http://localhost:3000',
-  // origin: process.env.CLIENT_URL || 'https://stanzo-front.vercel.app/',
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
 }));
@@ -426,6 +431,222 @@ const verifyToken = (req, res, next) => {
   }
 };
 
+// ==================== ENHANCED CREDIT CALCULATION FUNCTIONS ====================
+
+// NEW: Enhanced function to calculate cashier daily stats with proper credit integration
+const calculateCashierDailyStats = async (cashierId, shopId, date = new Date()) => {
+  try {
+    console.log(`📊 Calculating enhanced cashier daily stats for cashier: ${cashierId}, shop: ${shopId}, date: ${date}`);
+    
+    const targetDate = new Date(date);
+    const startOfDay = new Date(targetDate.setHours(0, 0, 0, 0));
+    const endOfDay = new Date(targetDate.setHours(23, 59, 59, 999));
+
+    // Fetch transactions and credits in parallel
+    const [transactions, credits] = await Promise.all([
+      models.Transaction.find({
+        $or: [
+          { cashierId: cashierId },
+          { cashierName: { $regex: cashierId, $options: 'i' } }
+        ],
+        $or: [
+          { shop: shopId },
+          { shopId: shopId }
+        ],
+        status: 'completed',
+        saleDate: {
+          $gte: startOfDay,
+          $lte: endOfDay
+        }
+      }).lean(),
+      
+      models.Credit.find({
+        $or: [
+          { cashierId: cashierId },
+          { cashierName: { $regex: cashierId, $options: 'i' } }
+        ],
+        $or: [
+          { shop: shopId },
+          { shopId: shopId },
+          { creditShopId: shopId }
+        ],
+        createdAt: {
+          $gte: startOfDay,
+          $lte: endOfDay
+        }
+      }).lean()
+    ]);
+
+    console.log(`📊 Found ${transactions.length} transactions and ${credits.length} credits for cashier daily stats`);
+
+    // Calculate basic transaction stats
+    const totalSales = transactions.reduce((sum, t) => sum + (t.totalAmount || 0), 0);
+    const totalTransactions = transactions.length;
+    const totalItems = transactions.reduce((sum, t) => 
+      sum + (t.items?.reduce((itemSum, item) => itemSum + (item.quantity || 0), 0) || 0), 0
+    );
+    const averageTransaction = totalTransactions > 0 ? totalSales / totalTransactions : 0;
+
+    // Calculate payment method breakdown with enhanced credit tracking
+    let cashAmount = 0;
+    let bankMpesaAmount = 0;
+    let creditAmount = 0;
+    let creditTransactions = 0;
+    let cashierItemsSold = 0;
+
+    const paymentMethodBreakdown = {
+      cash: 0,
+      bank_mpesa: 0,
+      credit: 0,
+      cash_bank_mpesa: 0
+    };
+
+    // NEW: Enhanced shop classification for credit
+    const creditShopClassification = {};
+
+    transactions.forEach(transaction => {
+      const method = transaction.paymentMethod?.toLowerCase() || 'cash';
+      const amount = transaction.totalAmount || 0;
+      const itemsCount = transaction.items?.reduce((sum, item) => sum + (item.quantity || 0), 0) || 0;
+      const shopName = transaction.shopName || transaction.shop?.name || 'Unknown Shop';
+      
+      cashierItemsSold += itemsCount;
+      
+      // Update payment method breakdown
+      if (paymentMethodBreakdown.hasOwnProperty(method)) {
+        paymentMethodBreakdown[method] += amount;
+      } else {
+        paymentMethodBreakdown.cash += amount;
+      }
+
+      // Enhanced money classification with shop tracking for credit
+      if (method === 'cash') {
+        cashAmount += amount;
+      } else if (method === 'cash_bank_mpesa') {
+        cashAmount += transaction.cashAmount || 0;
+        bankMpesaAmount += transaction.bankMpesaAmount || (amount - (transaction.cashAmount || 0));
+      } else if (method === 'credit') {
+        creditAmount += transaction.amountPaid || amount;
+        creditTransactions += 1;
+        
+        // NEW: Classify credit by shop
+        if (!creditShopClassification[shopName]) {
+          creditShopClassification[shopName] = {
+            amount: 0,
+            transactions: 0,
+            items: 0
+          };
+        }
+        creditShopClassification[shopName].amount += transaction.amountPaid || amount;
+        creditShopClassification[shopName].transactions += 1;
+        creditShopClassification[shopName].items += itemsCount;
+      } else {
+        bankMpesaAmount += amount;
+      }
+    });
+
+    // Calculate credit given today (total amount of credits created today)
+    const creditGivenToday = credits.reduce((sum, credit) => sum + (credit.totalAmount || 0), 0);
+
+    // Performance metrics
+    const performanceMetrics = {
+      salesEfficiency: totalTransactions > 0 ? totalSales / totalTransactions : 0,
+      itemsPerTransaction: totalTransactions > 0 ? totalItems / totalTransactions : 0,
+      revenuePerItem: totalItems > 0 ? totalSales / totalItems : 0
+    };
+
+    // Time-based analysis
+    const hourlyAnalysis = analyzeHourlySales(transactions);
+    const peakHours = findPeakHours(hourlyAnalysis);
+
+    // Enhanced result with comprehensive credit data
+    const result = {
+      // Basic metrics
+      totalSales: parseFloat(totalSales.toFixed(2)),
+      totalTransactions,
+      totalItems,
+      averageTransaction: parseFloat(averageTransaction.toFixed(2)),
+      
+      // Money collection
+      cashAmount: parseFloat(cashAmount.toFixed(2)),
+      bankMpesaAmount: parseFloat(bankMpesaAmount.toFixed(2)),
+      creditAmount: parseFloat(creditAmount.toFixed(2)),
+      cashierItemsSold,
+      
+      // Credit specific metrics
+      creditTransactions,
+      creditGivenToday: parseFloat(creditGivenToday.toFixed(2)),
+      transactionCount: totalTransactions,
+      creditCount: credits.length,
+      
+      // Payment breakdown
+      paymentMethodBreakdown,
+      
+      // NEW: Shop classification for credit
+      creditShopClassification,
+      
+      // Performance metrics
+      performanceMetrics,
+      
+      // Time analysis
+      hourlyAnalysis,
+      peakHours,
+      
+      // Additional insights
+      lastTransactionTime: transactions.length > 0 
+        ? transactions.reduce((latest, current) => 
+            new Date(current.saleDate || current.createdAt) > new Date(latest.saleDate || latest.createdAt) ? current : latest
+          ).saleDate
+        : null,
+      
+      timestamp: new Date().toISOString(),
+      date: targetDate.toISOString().split('T')[0]
+    };
+
+    console.log('✅ Enhanced cashier daily stats calculated successfully:', result);
+    return result;
+
+  } catch (error) {
+    console.error('❌ Error calculating enhanced cashier daily stats:', error);
+    throw error;
+  }
+};
+
+// Helper function to analyze sales by hour
+const analyzeHourlySales = (transactions) => {
+  const hourlyData = {};
+  
+  for (let hour = 0; hour < 24; hour++) {
+    hourlyData[hour] = {
+      hour,
+      sales: 0,
+      transactions: 0,
+      items: 0
+    };
+  }
+
+  transactions.forEach(transaction => {
+    const hour = new Date(transaction.saleDate).getHours();
+    hourlyData[hour].sales += transaction.totalAmount || 0;
+    hourlyData[hour].transactions += 1;
+    hourlyData[hour].items += transaction.items?.reduce((sum, item) => sum + (item.quantity || 0), 0) || 0;
+  });
+
+  return Object.values(hourlyData);
+};
+
+// Helper function to find peak performance hours
+const findPeakHours = (hourlyAnalysis) => {
+  if (!hourlyAnalysis.length) return [];
+  
+  const sortedBySales = [...hourlyAnalysis].sort((a, b) => b.sales - a.sales);
+  return sortedBySales.slice(0, 3).map(hour => ({
+    hour: hour.hour,
+    sales: hour.sales,
+    period: `${hour.hour}:00 - ${hour.hour + 1}:00`
+  }));
+};
+
 // ==================== OPTIMIZED REPORT HELPER FUNCTIONS ====================
 
 // Single optimized function to calculate all report data
@@ -483,10 +704,16 @@ const calculateOptimizedReports = async (params = {}) => {
       models.Product.find().lean(),
       models.Shop.find().lean(),
       models.Cashier.find().lean(),
-      models.Credit.find(shopId && shopId !== 'all' ? { shop: shopId } : {}).lean()
+      models.Credit.find(shopId && shopId !== 'all' ? { 
+        $or: [
+          { shop: shopId },
+          { shopId: shopId },
+          { creditShopId: shopId }
+        ]
+      } : {}).lean()
     ]);
 
-    console.log(`📊 Found ${transactions.length} transactions, ${expenses.length} expenses, ${products.length} products`);
+    console.log(`📊 Found ${transactions.length} transactions, ${expenses.length} expenses, ${products.length} products, ${credits.length} credits`);
 
     // Calculate comprehensive summary
     const totalRevenue = transactions.reduce((sum, t) => sum + (t.totalAmount || 0), 0);
@@ -496,7 +723,13 @@ const calculateOptimizedReports = async (params = {}) => {
     );
     const totalExpenses = expenses.reduce((sum, e) => sum + (e.amount || 0), 0);
     const totalProfit = totalRevenue - totalExpenses;
+    
+    // Enhanced credit calculations
     const creditAmount = credits.reduce((sum, c) => sum + (c.balanceDue || 0), 0);
+    const creditSalesToday = transactions
+      .filter(t => t.paymentMethod === 'credit')
+      .reduce((sum, t) => sum + (t.totalAmount || 0), 0);
+    const creditTransactionsCount = transactions.filter(t => t.paymentMethod === 'credit').length;
 
     // Group transactions by time period
     const groupedData = {};
@@ -546,7 +779,7 @@ const calculateOptimizedReports = async (params = {}) => {
       periodLabel: formatPeriodLabel(period.period, groupBy)
     })).sort((a, b) => a.period.localeCompare(b.period));
 
-    // Payment method breakdown
+    // Payment method breakdown with enhanced credit tracking
     const paymentMethodBreakdown = transactions.reduce((acc, t) => {
       const method = t.paymentMethod || 'cash';
       if (!acc[method]) {
@@ -557,7 +790,7 @@ const calculateOptimizedReports = async (params = {}) => {
       return acc;
     }, {});
 
-    // Cashier performance
+    // Cashier performance with credit sales
     const cashierPerformance = transactions.reduce((acc, t) => {
       const cashier = t.cashierName || 'Unknown Cashier';
       if (!acc[cashier]) {
@@ -565,12 +798,21 @@ const calculateOptimizedReports = async (params = {}) => {
           name: cashier,
           transactions: 0, 
           revenue: 0,
-          itemsSold: 0
+          itemsSold: 0,
+          creditSales: 0,
+          creditTransactions: 0
         };
       }
       acc[cashier].transactions += 1;
       acc[cashier].revenue += t.totalAmount || 0;
       acc[cashier].itemsSold += t.items?.reduce((sum, item) => sum + (item.quantity || 0), 0) || 0;
+      
+      // Track credit sales per cashier
+      if (t.paymentMethod === 'credit') {
+        acc[cashier].creditSales += t.totalAmount || 0;
+        acc[cashier].creditTransactions += 1;
+      }
+      
       return acc;
     }, {});
 
@@ -589,7 +831,7 @@ const calculateOptimizedReports = async (params = {}) => {
         }
         productPerformance[productName].quantity += item.quantity || 0;
         productPerformance[productName].revenue += item.totalPrice || 0;
-        productPerformance[productName].transactions += 1;
+        productPerformance[productPerformance].transactions += 1;
       });
     });
 
@@ -624,6 +866,8 @@ const calculateOptimizedReports = async (params = {}) => {
           totalExpenses: parseFloat(totalExpenses.toFixed(2)),
           totalProfit: parseFloat(totalProfit.toFixed(2)),
           creditAmount: parseFloat(creditAmount.toFixed(2)),
+          creditSalesToday: parseFloat(creditSalesToday.toFixed(2)),
+          creditTransactionsCount,
           netProfit: parseFloat((totalProfit - creditAmount).toFixed(2)),
           averageTransaction: totalTransactions > 0 ? parseFloat((totalRevenue / totalTransactions).toFixed(2)) : 0,
           dateRange: {
@@ -642,7 +886,9 @@ const calculateOptimizedReports = async (params = {}) => {
           .map(cashier => ({
             ...cashier,
             revenue: parseFloat(cashier.revenue.toFixed(2)),
-            averageTransaction: cashier.transactions > 0 ? parseFloat((cashier.revenue / cashier.transactions).toFixed(2)) : 0
+            creditSales: parseFloat(cashier.creditSales.toFixed(2)),
+            averageTransaction: cashier.transactions > 0 ? parseFloat((cashier.revenue / cashier.transactions).toFixed(2)) : 0,
+            creditPercentage: cashier.revenue > 0 ? parseFloat(((cashier.creditSales / cashier.revenue) * 100).toFixed(1)) : 0
           }))
           .sort((a, b) => b.revenue - a.revenue),
         productPerformance: Object.values(productPerformance)
@@ -662,6 +908,8 @@ const calculateOptimizedReports = async (params = {}) => {
           totalRevenue: parseFloat(totalRevenue.toFixed(2)),
           totalTransactions,
           totalItemsSold,
+          creditSales: parseFloat(creditSalesToday.toFixed(2)),
+          creditTransactions: creditTransactionsCount,
           averageTransaction: totalTransactions > 0 ? parseFloat((totalRevenue / totalTransactions).toFixed(2)) : 0,
           period: {
             startDate: startDate || 'All time',
@@ -674,52 +922,18 @@ const calculateOptimizedReports = async (params = {}) => {
           .slice(0, 50)
       },
 
-      // Product Performance Data
-      productPerformance: {
-        products: Object.values(productPerformance)
-          .map(product => ({
-            ...product,
-            totalRevenue: parseFloat(product.revenue.toFixed(2)),
-            averagePrice: product.quantity > 0 ? parseFloat((product.revenue / product.quantity).toFixed(2)) : 0,
-            revenuePerTransaction: product.transactions > 0 ? parseFloat((product.revenue / product.transactions).toFixed(2)) : 0
-          }))
-          .sort((a, b) => b.totalRevenue - a.totalRevenue)
-          .slice(0, 50),
-        summary: {
-          totalProducts: Object.keys(productPerformance).length,
-          totalRevenue: Object.values(productPerformance).reduce((sum, p) => sum + p.revenue, 0),
-          totalQuantity: Object.values(productPerformance).reduce((sum, p) => sum + p.quantity, 0)
-        }
-      },
-
-      // Cashier Performance Data
-      cashierPerformance: {
-        cashiers: Object.values(cashierPerformance)
-          .map(cashier => ({
-            ...cashier,
-            totalRevenue: parseFloat(cashier.revenue.toFixed(2)),
-            averageTransaction: cashier.transactions > 0 ? parseFloat((cashier.revenue / cashier.transactions).toFixed(2)) : 0,
-            itemsPerTransaction: cashier.transactions > 0 ? parseFloat((cashier.itemsSold / cashier.transactions).toFixed(2)) : 0,
-            performanceScore: calculateCashierPerformanceScore(cashier)
-          }))
-          .sort((a, b) => b.totalRevenue - a.revenue),
-        summary: {
-          totalCashiers: Object.keys(cashierPerformance).length,
-          totalRevenue: Object.values(cashierPerformance).reduce((sum, c) => sum + c.revenue, 0),
-          totalTransactions: Object.values(cashierPerformance).reduce((sum, c) => sum + c.transactions, 0)
-        }
-      },
-
       // Additional data for frontend
       comprehensiveData: {
         transactions,
         expenses,
         products,
+        credits,
         summary: {
           totalTransactions: transactions.length,
           totalRevenue: parseFloat(totalRevenue.toFixed(2)),
           totalExpenses: parseFloat(totalExpenses.toFixed(2)),
-          totalProducts: products.length
+          totalProducts: products.length,
+          totalCredits: credits.length
         }
       },
 
@@ -768,15 +982,6 @@ const formatPeriodLabel = (period, groupBy) => {
   }
 };
 
-// Helper function to calculate cashier performance score
-const calculateCashierPerformanceScore = (cashier) => {
-  const revenueScore = Math.min(100, (cashier.revenue / 10000) * 100);
-  const transactionScore = Math.min(100, (cashier.transactions / 100) * 100);
-  const efficiencyScore = Math.min(100, (cashier.itemsPerTransaction / 10) * 100);
-  
-  return parseFloat(((revenueScore * 0.5) + (transactionScore * 0.3) + (efficiencyScore * 0.2)).toFixed(1));
-};
-
 // ==================== SINGLE OPTIMIZED ENDPOINT ====================
 
 // NEW: Single optimized endpoint that replaces 5 separate API calls
@@ -820,6 +1025,53 @@ app.get('/api/transactions/reports/optimized', async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Failed to generate optimized report',
+      error: error.message,
+      processingTime: 0
+    });
+  }
+});
+
+// ==================== ENHANCED CASHIER DAILY ANALYSIS ENDPOINT ====================
+
+// NEW: Enhanced endpoint specifically for cashier daily analysis with credit integration
+app.get('/api/transactions/analysis/cashier-daily', async (req, res) => {
+  try {
+    const { cashierId, shopId, date } = req.query;
+    
+    if (!cashierId || !shopId) {
+      return res.status(400).json({
+        success: false,
+        message: 'Missing required parameters: cashierId, shopId'
+      });
+    }
+
+    console.log('📊 Processing enhanced cashier daily analysis request...', {
+      cashierId,
+      shopId,
+      date
+    });
+
+    const startTime = Date.now();
+    
+    // Use the enhanced calculation function
+    const dailyStats = await calculateCashierDailyStats(cashierId, shopId, date || new Date());
+
+    const processingTime = Date.now() - startTime;
+
+    console.log(`✅ Enhanced cashier daily analysis generated in ${processingTime}ms`);
+
+    res.json({
+      success: true,
+      data: dailyStats,
+      processingTime,
+      message: 'Cashier daily analysis generated successfully'
+    });
+
+  } catch (error) {
+    console.error('❌ Error generating cashier daily analysis:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to generate cashier daily analysis',
       error: error.message,
       processingTime: 0
     });
@@ -962,8 +1214,8 @@ app.get('/api/transactions/reports/cashier-performance', async (req, res) => {
 
 // ==================== STATISTICS HELPER FUNCTIONS ====================
 
-// Helper function to calculate cashier daily stats
-const calculateCashierDailyStats = async (cashierId, shopId, startDate, endDate) => {
+// Helper function to calculate cashier daily stats (legacy - maintained for backward compatibility)
+const calculateCashierDailyStatsLegacy = async (cashierId, shopId, startDate, endDate) => {
   try {
     console.log(`📊 Calculating cashier daily stats for cashier: ${cashierId}, shop: ${shopId}`);
     
@@ -1021,8 +1273,8 @@ const calculateCashierDailyStats = async (cashierId, shopId, startDate, endDate)
   }
 };
 
-// Helper function to calculate daily sales stats
-const calculateDailySalesStats = async (cashierId, shopId, startDate, endDate) => {
+// Helper function to calculate daily sales stats (legacy - maintained for backward compatibility)
+const calculateDailySalesStatsLegacy = async (cashierId, shopId, startDate, endDate) => {
   try {
     console.log(`📈 Calculating daily sales stats for cashier: ${cashierId}, shop: ${shopId}`);
     
@@ -1113,7 +1365,7 @@ app.get('/api/health', (req, res) => {
 
 // ==================== MISSING API ENDPOINTS ====================
 
-// Cashier Daily Stats Endpoint
+// Cashier Daily Stats Endpoint (legacy - maintained for backward compatibility)
 app.get('/api/transactions/stats/cashier-daily', async (req, res) => {
   try {
     const { cashierId, shopId, startDate, endDate } = req.query;
@@ -1127,7 +1379,7 @@ app.get('/api/transactions/stats/cashier-daily', async (req, res) => {
 
     console.log(`📊 Fetching cashier daily stats:`, { cashierId, shopId, startDate, endDate });
 
-    const stats = await calculateCashierDailyStats(cashierId, shopId, startDate, endDate);
+    const stats = await calculateCashierDailyStatsLegacy(cashierId, shopId, startDate, endDate);
     res.json(stats);
 
   } catch (error) {
@@ -1140,7 +1392,7 @@ app.get('/api/transactions/stats/cashier-daily', async (req, res) => {
   }
 });
 
-// Daily Sales Stats Endpoint
+// Daily Sales Stats Endpoint (legacy - maintained for backward compatibility)
 app.get('/api/transactions/stats/daily-sales', async (req, res) => {
   try {
     const { cashierId, shopId, startDate, endDate } = req.query;
@@ -1154,7 +1406,7 @@ app.get('/api/transactions/stats/daily-sales', async (req, res) => {
 
     console.log(`📈 Fetching daily sales stats:`, { cashierId, shopId, startDate, endDate });
 
-    const stats = await calculateDailySalesStats(cashierId, shopId, startDate, endDate);
+    const stats = await calculateDailySalesStatsLegacy(cashierId, shopId, startDate, endDate);
     res.json(stats);
 
   } catch (error) {
@@ -1167,14 +1419,36 @@ app.get('/api/transactions/stats/daily-sales', async (req, res) => {
   }
 });
 
-// Credits API Endpoints
+// ==================== ENHANCED CREDITS API ENDPOINTS ====================
+
+// Enhanced Credits API Endpoints with proper credit calculations
 app.get('/api/credits', async (req, res) => {
   try {
-    const { shopId, status } = req.query;
+    const { shopId, status, cashierId, startDate, endDate } = req.query;
     
     let filter = {};
-    if (shopId && shopId !== 'all') filter.shop = shopId;
+    if (shopId && shopId !== 'all') {
+      filter.$or = [
+        { shop: shopId },
+        { shopId: shopId },
+        { creditShopId: shopId }
+      ];
+    }
     if (status && status !== 'all') filter.status = status;
+    if (cashierId && cashierId !== 'all') {
+      filter.$or = [
+        { cashierId: cashierId },
+        { cashierName: { $regex: cashierId, $options: 'i' } }
+      ];
+    }
+    
+    // Date filtering
+    if (startDate && endDate) {
+      filter.createdAt = {
+        $gte: new Date(startDate),
+        $lte: new Date(endDate)
+      };
+    }
 
     const credits = await models.Credit.find(filter)
       .populate('transactionId')
@@ -1195,31 +1469,65 @@ app.get('/api/credits', async (req, res) => {
   }
 });
 
+// Enhanced credit creation with proper calculations and shop classification
 app.post('/api/credits', async (req, res) => {
   try {
     const creditData = req.body;
     
+    console.log('💳 Creating enhanced credit record with shop classification:', creditData);
+    
     // Validate required fields
-    if (!creditData.transactionId || !creditData.customerName || !creditData.totalAmount) {
+    if (!creditData.customerName || !creditData.totalAmount || !creditData.dueDate) {
       return res.status(400).json({
         success: false,
-        message: 'Missing required fields: transactionId, customerName, totalAmount'
+        message: 'Missing required fields: customerName, totalAmount, dueDate'
       });
     }
 
-    const credit = new models.Credit(creditData);
+    // Calculate balance due
+    const totalAmount = Number(creditData.totalAmount) || 0;
+    const amountPaid = Number(creditData.amountPaid) || 0;
+    const balanceDue = totalAmount - amountPaid;
+    
+    // Set initial status based on amounts
+    let status = 'pending';
+    if (balanceDue <= 0) {
+      status = 'paid';
+    } else if (amountPaid > 0) {
+      status = 'partially_paid';
+    }
+
+    // Enhanced credit record with shop classification
+    const enhancedCreditData = {
+      ...creditData,
+      totalAmount,
+      amountPaid,
+      balanceDue: Math.max(0, balanceDue),
+      status,
+      // Ensure shop classification fields are set
+      creditShopName: creditData.creditShopName || creditData.shopName,
+      creditShopId: creditData.creditShopId || creditData.shopId,
+      createdAt: new Date(),
+      updatedAt: new Date()
+    };
+
+    const credit = new models.Credit(enhancedCreditData);
     await credit.save();
 
     // Populate the transaction data in response
-    await credit.populate('transactionId');
+    if (creditData.transactionId) {
+      await credit.populate('transactionId');
+    }
+
+    console.log('✅ Enhanced credit record created successfully with shop classification:', credit._id);
 
     res.status(201).json({
       success: true,
       data: credit,
-      message: 'Credit record created successfully'
+      message: 'Credit record created successfully with shop classification'
     });
   } catch (error) {
-    console.error('Error creating credit:', error);
+    console.error('❌ Error creating credit record:', error);
     res.status(500).json({
       success: false,
       message: 'Failed to create credit record',
@@ -1251,11 +1559,39 @@ app.get('/api/credits/:id', async (req, res) => {
   }
 });
 
+// Enhanced credit update with proper calculations
 app.put('/api/credits/:id', async (req, res) => {
   try {
+    const updateData = req.body;
+    
+    console.log('✏️ Updating credit record:', req.params.id, updateData);
+    
+    // Recalculate balance if amounts are updated
+    if (updateData.totalAmount !== undefined || updateData.amountPaid !== undefined) {
+      const existingCredit = await models.Credit.findById(req.params.id);
+      if (existingCredit) {
+        const totalAmount = updateData.totalAmount !== undefined ? updateData.totalAmount : existingCredit.totalAmount;
+        const amountPaid = updateData.amountPaid !== undefined ? updateData.amountPaid : existingCredit.amountPaid;
+        const balanceDue = totalAmount - amountPaid;
+        
+        // Update status based on new amounts
+        let status = existingCredit.status;
+        if (balanceDue <= 0) {
+          status = 'paid';
+        } else if (amountPaid > 0) {
+          status = 'partially_paid';
+        } else {
+          status = 'pending';
+        }
+        
+        updateData.balanceDue = Math.max(0, balanceDue);
+        updateData.status = status;
+      }
+    }
+
     const credit = await models.Credit.findByIdAndUpdate(
       req.params.id,
-      { ...req.body, updatedAt: new Date() },
+      { ...updateData, updatedAt: new Date() },
       { new: true, runValidators: true }
     ).populate('transactionId');
     
@@ -1266,13 +1602,15 @@ app.put('/api/credits/:id', async (req, res) => {
       });
     }
     
+    console.log('✅ Credit record updated successfully:', req.params.id);
+    
     res.json({
       success: true,
       data: credit,
       message: 'Credit record updated successfully'
     });
   } catch (error) {
-    console.error('Error updating credit:', error);
+    console.error('❌ Error updating credit record:', error);
     res.status(500).json({
       success: false,
       message: 'Failed to update credit record',
@@ -1281,9 +1619,10 @@ app.put('/api/credits/:id', async (req, res) => {
   }
 });
 
+// Enhanced credit payment with proper calculations
 app.patch('/api/credits/:id/payment', async (req, res) => {
   try {
-    const { amount, paymentMethod, recordedBy } = req.body;
+    const { amount, paymentMethod, recordedBy, cashierName } = req.body;
     
     if (!amount || !paymentMethod) {
       return res.status(400).json({
@@ -1300,22 +1639,29 @@ app.patch('/api/credits/:id/payment', async (req, res) => {
       });
     }
 
+    const paymentAmount = Number(amount);
+    const currentAmountPaid = Number(credit.amountPaid) || 0;
+    const newAmountPaid = currentAmountPaid + paymentAmount;
+    const totalAmount = Number(credit.totalAmount) || 0;
+    const newBalanceDue = Math.max(0, totalAmount - newAmountPaid);
+
     // Add payment to history
     credit.paymentHistory.push({
-      amount,
+      amount: paymentAmount,
       paymentMethod,
       recordedBy: recordedBy || 'System',
+      cashierName: cashierName || credit.cashierName,
       paymentDate: new Date()
     });
 
     // Update amounts
-    credit.amountPaid += amount;
-    credit.balanceDue = credit.totalAmount - credit.amountPaid;
+    credit.amountPaid = newAmountPaid;
+    credit.balanceDue = newBalanceDue;
 
     // Update status
-    if (credit.balanceDue <= 0) {
+    if (newBalanceDue <= 0) {
       credit.status = 'paid';
-    } else if (credit.amountPaid > 0) {
+    } else if (newAmountPaid > 0) {
       credit.status = 'partially_paid';
     }
 
@@ -1323,6 +1669,13 @@ app.patch('/api/credits/:id/payment', async (req, res) => {
     await credit.save();
 
     await credit.populate('transactionId');
+
+    console.log('✅ Payment recorded successfully for credit:', req.params.id, {
+      paymentAmount,
+      newAmountPaid,
+      newBalanceDue,
+      status: credit.status
+    });
 
     res.json({
       success: true,
@@ -1334,6 +1687,127 @@ app.patch('/api/credits/:id/payment', async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Failed to record payment',
+      error: error.message
+    });
+  }
+});
+
+// Enhanced credit deletion
+app.delete('/api/credits/:id', async (req, res) => {
+  try {
+    console.log('🗑️ Deleting credit record:', req.params.id);
+    
+    const credit = await models.Credit.findByIdAndDelete(req.params.id);
+    
+    if (!credit) {
+      return res.status(404).json({
+        success: false,
+        message: 'Credit record not found'
+      });
+    }
+    
+    console.log('✅ Credit record deleted successfully:', req.params.id);
+    
+    res.json({
+      success: true,
+      message: 'Credit record deleted successfully',
+      deletedId: req.params.id
+    });
+  } catch (error) {
+    console.error('❌ Error deleting credit record:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to delete credit record',
+      error: error.message
+    });
+  }
+});
+
+// NEW: Get credits by shop classification
+app.get('/api/credits/shop/:shopId', async (req, res) => {
+  try {
+    const { shopId } = req.params;
+    const { status } = req.query;
+    
+    let filter = {
+      $or: [
+        { shop: shopId },
+        { shopId: shopId },
+        { creditShopId: shopId }
+      ]
+    };
+    
+    if (status && status !== 'all') {
+      filter.status = status;
+    }
+
+    const credits = await models.Credit.find(filter)
+      .populate('transactionId')
+      .sort({ dueDate: 1 });
+
+    res.json({
+      success: true,
+      data: credits,
+      count: credits.length
+    });
+  } catch (error) {
+    console.error('Error fetching credits by shop:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch credits by shop',
+      error: error.message
+    });
+  }
+});
+
+// NEW: Get shop credit summary
+app.get('/api/credits/shop-summary', async (req, res) => {
+  try {
+    const shops = await models.Shop.find();
+    const shopSummary = [];
+
+    for (const shop of shops) {
+      const credits = await models.Credit.find({
+        $or: [
+          { shop: shop._id },
+          { shopId: shop._id },
+          { creditShopId: shop._id }
+        ]
+      });
+
+      const totalCredits = credits.length;
+      const totalAmount = credits.reduce((sum, c) => sum + (c.totalAmount || 0), 0);
+      const totalPaid = credits.reduce((sum, c) => sum + (c.amountPaid || 0), 0);
+      const totalBalance = credits.reduce((sum, c) => sum + (c.balanceDue || 0), 0);
+      const overdueCount = credits.filter(c => 
+        c.dueDate && new Date(c.dueDate) < new Date() && c.balanceDue > 0
+      ).length;
+      const pendingCount = credits.filter(c => c.status === 'pending').length;
+      const paidCount = credits.filter(c => c.status === 'paid').length;
+
+      shopSummary.push({
+        shopId: shop._id,
+        shopName: shop.name,
+        totalCredits,
+        totalAmount: parseFloat(totalAmount.toFixed(2)),
+        totalPaid: parseFloat(totalPaid.toFixed(2)),
+        totalBalance: parseFloat(totalBalance.toFixed(2)),
+        overdueCount,
+        pendingCount,
+        paidCount,
+        collectionRate: totalAmount > 0 ? parseFloat(((totalPaid / totalAmount) * 100).toFixed(2)) : 0
+      });
+    }
+
+    res.json({
+      success: true,
+      data: shopSummary
+    });
+  } catch (error) {
+    console.error('Error fetching shop credit summary:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch shop credit summary',
       error: error.message
     });
   }
@@ -1692,146 +2166,7 @@ app.get('/api/auth/me', (req, res) => {
     });
   }
 });
-// Enhanced Credits API Endpoints with proper delete functionality
-app.delete('/api/credits/:id', async (req, res) => {
-  try {
-    console.log('🗑️ Deleting credit record:', req.params.id);
-    
-    const credit = await models.Credit.findByIdAndDelete(req.params.id);
-    
-    if (!credit) {
-      return res.status(404).json({
-        success: false,
-        message: 'Credit record not found'
-      });
-    }
-    
-    console.log('✅ Credit record deleted successfully:', req.params.id);
-    
-    res.json({
-      success: true,
-      message: 'Credit record deleted successfully',
-      deletedId: req.params.id
-    });
-  } catch (error) {
-    console.error('❌ Error deleting credit record:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Failed to delete credit record',
-      error: error.message
-    });
-  }
-});
 
-// Enhanced credit creation with shop and cashier data
-app.post('/api/credits', async (req, res) => {
-  try {
-    const creditData = req.body;
-    
-    console.log('💳 Creating credit record with data:', creditData);
-    
-    // Validate required fields
-    if (!creditData.customerName || !creditData.totalAmount || !creditData.dueDate) {
-      return res.status(400).json({
-        success: false,
-        message: 'Missing required fields: customerName, totalAmount, dueDate'
-      });
-    }
-
-    // Calculate balance due
-    creditData.balanceDue = creditData.totalAmount - (creditData.amountPaid || 0);
-    
-    // Set initial status
-    if (!creditData.status) {
-      if (creditData.balanceDue <= 0) {
-        creditData.status = 'paid';
-      } else if (creditData.amountPaid > 0) {
-        creditData.status = 'partially_paid';
-      } else {
-        creditData.status = 'pending';
-      }
-    }
-
-    const credit = new models.Credit(creditData);
-    await credit.save();
-
-    // Populate related data if available
-    if (creditData.transactionId) {
-      await credit.populate('transactionId');
-    }
-
-    console.log('✅ Credit record created successfully:', credit._id);
-
-    res.status(201).json({
-      success: true,
-      data: credit,
-      message: 'Credit record created successfully'
-    });
-  } catch (error) {
-    console.error('❌ Error creating credit record:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Failed to create credit record',
-      error: error.message
-    });
-  }
-});
-
-// Enhanced credit update with shop and cashier assignment
-app.put('/api/credits/:id', async (req, res) => {
-  try {
-    const updateData = req.body;
-    
-    console.log('✏️ Updating credit record:', req.params.id, updateData);
-    
-    // Recalculate balance if amounts are updated
-    if (updateData.totalAmount !== undefined || updateData.amountPaid !== undefined) {
-      const existingCredit = await models.Credit.findById(req.params.id);
-      if (existingCredit) {
-        const totalAmount = updateData.totalAmount !== undefined ? updateData.totalAmount : existingCredit.totalAmount;
-        const amountPaid = updateData.amountPaid !== undefined ? updateData.amountPaid : existingCredit.amountPaid;
-        updateData.balanceDue = totalAmount - amountPaid;
-        
-        // Update status based on new amounts
-        if (updateData.balanceDue <= 0) {
-          updateData.status = 'paid';
-        } else if (amountPaid > 0) {
-          updateData.status = 'partially_paid';
-        } else {
-          updateData.status = 'pending';
-        }
-      }
-    }
-
-    const credit = await models.Credit.findByIdAndUpdate(
-      req.params.id,
-      { ...updateData, updatedAt: new Date() },
-      { new: true, runValidators: true }
-    ).populate('transactionId');
-    
-    if (!credit) {
-      return res.status(404).json({
-        success: false,
-        message: 'Credit record not found'
-      });
-    }
-    
-    console.log('✅ Credit record updated successfully:', req.params.id);
-    
-    res.json({
-      success: true,
-      data: credit,
-      message: 'Credit record updated successfully'
-    });
-  } catch (error) {
-    console.error('❌ Error updating credit record:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Failed to update credit record',
-      error: error.message
-    });
-  }
-});
 // ==================== EXISTING API ROUTES (MAINTAINED) ====================
 
 // Products API
@@ -2554,6 +2889,16 @@ app.get('/api/transactions/shop-performance/:shopId', async (req, res) => {
       ...dateFilter
     });
 
+    // Get credits for this shop
+    const credits = await models.Credit.find({
+      $or: [
+        { shop: shopId },
+        { shopId: shopId },
+        { creditShopId: shopId }
+      ],
+      ...dateFilter
+    });
+
     // Calculate performance metrics
     const totalRevenue = transactions.reduce((sum, t) => sum + (t.totalAmount || 0), 0);
     const totalTransactions = transactions.length;
@@ -2573,6 +2918,13 @@ app.get('/api/transactions/shop-performance/:shopId', async (req, res) => {
     const totalProfit = totalRevenue - totalExpenses;
     const profitMargin = totalRevenue > 0 ? (totalProfit / totalRevenue) * 100 : 0;
 
+    // Credit calculations
+    const totalCredits = credits.length;
+    const totalCreditAmount = credits.reduce((sum, c) => sum + (c.totalAmount || 0), 0);
+    const totalCreditPaid = credits.reduce((sum, c) => sum + (c.amountPaid || 0), 0);
+    const totalCreditBalance = credits.reduce((sum, c) => sum + (c.balanceDue || 0), 0);
+    const creditCollectionRate = totalCreditAmount > 0 ? (totalCreditPaid / totalCreditAmount) * 100 : 0;
+
     // Calculate performance score (simplified)
     const performanceScore = Math.min(100, 
       (totalTransactions * 0.3) + 
@@ -2589,6 +2941,12 @@ app.get('/api/transactions/shop-performance/:shopId', async (req, res) => {
       totalProfit: parseFloat(totalProfit.toFixed(2)),
       profitMargin: parseFloat(profitMargin.toFixed(1)),
       performanceScore: Math.round(performanceScore),
+      // Enhanced credit data
+      totalCredits,
+      totalCreditAmount: parseFloat(totalCreditAmount.toFixed(2)),
+      totalCreditPaid: parseFloat(totalCreditPaid.toFixed(2)),
+      totalCreditBalance: parseFloat(totalCreditBalance.toFixed(2)),
+      creditCollectionRate: parseFloat(creditCollectionRate.toFixed(2)),
       shopDetails: {
         name: shop.name,
         location: shop.location,
@@ -2600,12 +2958,12 @@ app.get('/api/transactions/shop-performance/:shopId', async (req, res) => {
       }
     };
 
-    console.log(`✅ Shop performance data calculated:`, performanceData);
+    console.log(`✅ Shop performance data calculated with credit integration:`, performanceData);
 
     res.json({
       success: true,
       data: performanceData,
-      message: 'Shop performance data fetched successfully'
+      message: 'Shop performance data fetched successfully with credit integration'
     });
 
   } catch (error) {
@@ -2664,25 +3022,31 @@ app.get('/api/transactions/sales/all', async (req, res) => {
       .lean();
 
     // Get related data
-    const [expenses, products] = await Promise.all([
+    const [expenses, products, credits] = await Promise.all([
       models.Expense.find(startDate && endDate ? {
         date: { $gte: new Date(startDate), $lte: new Date(endDate) }
       } : {}).lean(),
-      models.Product.find().lean()
+      models.Product.find().lean(),
+      models.Credit.find(startDate && endDate ? {
+        createdAt: { $gte: new Date(startDate), $lte: new Date(endDate) }
+      } : {}).lean()
     ]);
 
-    console.log(`✅ Found ${transactions.length} transactions, ${expenses.length} expenses, ${products.length} products`);
+    console.log(`✅ Found ${transactions.length} transactions, ${expenses.length} expenses, ${products.length} products, ${credits.length} credits`);
 
     res.json({
       success: true,
       transactions,
       expenses,
       products,
+      credits,
       summary: {
         totalTransactions: transactions.length,
         totalRevenue: transactions.reduce((sum, t) => sum + (t.totalAmount || 0), 0),
         totalExpenses: expenses.reduce((sum, e) => sum + (e.amount || 0), 0),
-        totalProducts: products.length
+        totalProducts: products.length,
+        totalCredits: credits.length,
+        totalCreditAmount: credits.reduce((sum, c) => sum + (c.totalAmount || 0), 0)
       }
     });
   } catch (error) {
@@ -2854,8 +3218,9 @@ app.get('/api/debug/routes', (req, res) => {
     'POST /api/auth/login (CASHIER - password-based)',
     'POST /api/auth/logout',
     'GET  /api/auth/me',
-    // NEW OPTIMIZED ENDPOINT
+    // NEW ENHANCED ENDPOINTS
     'GET  /api/transactions/reports/optimized (NEW - replaces 5 endpoints)',
+    'GET  /api/transactions/analysis/cashier-daily (NEW - enhanced cashier analysis)',
     // EXISTING REPORT ENDPOINTS (maintained for backward compatibility)
     'GET  /api/transactions/reports/comprehensive',
     'GET  /api/transactions/reports/sales-summary',
@@ -2864,12 +3229,15 @@ app.get('/api/debug/routes', (req, res) => {
     // STATS ENDPOINTS
     'GET  /api/transactions/stats/cashier-daily',
     'GET  /api/transactions/stats/daily-sales',
-    // CREDITS ENDPOINTS
+    // ENHANCED CREDITS ENDPOINTS
     'GET  /api/credits',
     'POST /api/credits',
     'GET  /api/credits/:id',
     'PUT  /api/credits/:id',
     'PATCH /api/credits/:id/payment',
+    'DELETE /api/credits/:id',
+    'GET  /api/credits/shop/:shopId (NEW)',
+    'GET  /api/credits/shop-summary (NEW)',
     // EXISTING ENDPOINTS
     'GET  /api/products',
     'GET  /api/products/:id',
@@ -2920,6 +3288,179 @@ app.get('/api/debug/email-status', (req, res) => {
   });
 });
 
+// ==================== NEW CASHIER CREDIT ENDPOINTS ====================
+
+// NEW: Get cashier credit summary
+app.get('/api/credits/cashier-summary', async (req, res) => {
+  try {
+    const { cashierId, shopId, date } = req.query;
+    
+    if (!cashierId || !shopId) {
+      return res.status(400).json({
+        success: false,
+        message: 'Missing required parameters: cashierId, shopId'
+      });
+    }
+
+    const targetDate = new Date(date || new Date());
+    const startOfDay = new Date(targetDate.setHours(0, 0, 0, 0));
+    const endOfDay = new Date(targetDate.setHours(23, 59, 59, 999));
+
+    // Get credits for this cashier and shop
+    const credits = await models.Credit.find({
+      $or: [
+        { cashierId: cashierId },
+        { cashierName: { $regex: cashierId, $options: 'i' } }
+      ],
+      $or: [
+        { shop: shopId },
+        { shopId: shopId },
+        { creditShopId: shopId }
+      ],
+      createdAt: {
+        $gte: startOfDay,
+        $lte: endOfDay
+      }
+    }).lean();
+
+    // Calculate summary statistics
+    const totalCredits = credits.length;
+    const totalCreditAmount = credits.reduce((sum, c) => sum + (c.totalAmount || 0), 0);
+    const totalAmountPaid = credits.reduce((sum, c) => sum + (c.amountPaid || 0), 0);
+    const totalBalanceDue = credits.reduce((sum, c) => sum + (c.balanceDue || 0), 0);
+    const collectionRate = totalCreditAmount > 0 ? (totalAmountPaid / totalCreditAmount) * 100 : 0;
+
+    // Status breakdown
+    const statusBreakdown = {
+      pending: credits.filter(c => c.status === 'pending').length,
+      partially_paid: credits.filter(c => c.status === 'partially_paid').length,
+      paid: credits.filter(c => c.status === 'paid').length,
+      overdue: credits.filter(c => 
+        c.dueDate && new Date(c.dueDate) < new Date() && c.balanceDue > 0
+      ).length
+    };
+
+    // Shop breakdown
+    const shopBreakdown = credits.reduce((acc, credit) => {
+      const shopName = credit.creditShopName || credit.shopName || 'Unknown Shop';
+      if (!acc[shopName]) {
+        acc[shopName] = {
+          shopName,
+          totalAmount: 0,
+          amountPaid: 0,
+          balanceDue: 0,
+          totalCredits: 0
+        };
+      }
+      acc[shopName].totalAmount += credit.totalAmount || 0;
+      acc[shopName].amountPaid += credit.amountPaid || 0;
+      acc[shopName].balanceDue += credit.balanceDue || 0;
+      acc[shopName].totalCredits += 1;
+      return acc;
+    }, {});
+
+    // Payment history (last 10 payments)
+    const paymentHistory = [];
+    credits.forEach(credit => {
+      credit.paymentHistory?.forEach(payment => {
+        paymentHistory.push({
+          ...payment,
+          customerName: credit.customerName,
+          creditId: credit._id
+        });
+      });
+    });
+
+    paymentHistory.sort((a, b) => new Date(b.paymentDate) - new Date(a.paymentDate));
+
+    const result = {
+      summary: {
+        totalCredits,
+        totalCreditAmount: parseFloat(totalCreditAmount.toFixed(2)),
+        totalAmountPaid: parseFloat(totalAmountPaid.toFixed(2)),
+        totalBalanceDue: parseFloat(totalBalanceDue.toFixed(2)),
+        collectionRate: parseFloat(collectionRate.toFixed(2)),
+        averageCredit: totalCredits > 0 ? parseFloat((totalCreditAmount / totalCredits).toFixed(2)) : 0
+      },
+      statusBreakdown,
+      shopBreakdown: Object.values(shopBreakdown),
+      dueSoonCount: credits.filter(c => 
+        c.dueDate && 
+        new Date(c.dueDate) > new Date() && 
+        new Date(c.dueDate) <= new Date(Date.now() + 2 * 24 * 60 * 60 * 1000) &&
+        c.balanceDue > 0
+      ).length,
+      overdueCount: statusBreakdown.overdue,
+      paymentHistory: paymentHistory.slice(0, 10),
+      recentCredits: credits
+        .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
+        .slice(0, 10)
+    };
+
+    res.json({
+      success: true,
+      data: result
+    });
+
+  } catch (error) {
+    console.error('Error fetching cashier credit summary:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch cashier credit summary',
+      error: error.message
+    });
+  }
+});
+
+// NEW: Get cashier daily credits
+app.get('/api/credits/cashier-daily', async (req, res) => {
+  try {
+    const { cashierId, shopId, date } = req.query;
+    
+    if (!cashierId || !shopId) {
+      return res.status(400).json({
+        success: false,
+        message: 'Missing required parameters: cashierId, shopId'
+      });
+    }
+
+    const targetDate = new Date(date || new Date());
+    const startOfDay = new Date(targetDate.setHours(0, 0, 0, 0));
+    const endOfDay = new Date(targetDate.setHours(23, 59, 59, 999));
+
+    const credits = await models.Credit.find({
+      $or: [
+        { cashierId: cashierId },
+        { cashierName: { $regex: cashierId, $options: 'i' } }
+      ],
+      $or: [
+        { shop: shopId },
+        { shopId: shopId },
+        { creditShopId: shopId }
+      ],
+      createdAt: {
+        $gte: startOfDay,
+        $lte: endOfDay
+      }
+    })
+    .sort({ createdAt: -1 })
+    .lean();
+
+    res.json({
+      success: true,
+      data: credits
+    });
+
+  } catch (error) {
+    console.error('Error fetching cashier daily credits:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch cashier daily credits',
+      error: error.message
+    });
+  }
+});
+
 // 404 handler
 app.use('/api/*', (req, res) => {
   res.status(404).json({
@@ -2944,25 +3485,27 @@ const startServer = async () => {
       console.log(`📍 Port: ${PORT}`);
       console.log(`🔗 URL: http://localhost:${PORT}`);
       console.log(`🌐 Client: ${process.env.CLIENT_URL || 'http://localhost:3000'}`);
-      // console.log(`🌐 Client: ${process.env.CLIENT_URL || 'https://stanzo-front.vercel.app/'}`); 
       console.log(`📊 Database: ${mongoose.connection.name}`);
       console.log(`📧 Email Service: ${emailTransporter ? 'Enabled' : 'Disabled'}`);
       console.log(`🔐 Authentication:`);
       console.log(`   - ADMIN: Email-based Secure Code`);
       console.log(`   - CASHIER: Password-based`);
       console.log(`⏰ JWT Expiry: ${process.env.JWT_EXPIRES_IN || '8h'}`);
-      console.log(`📋 Key Endpoints:`);
+      console.log(`📋 Key Enhanced Endpoints:`);
       console.log(`   - POST /api/auth/request-code (Admin)`);
       console.log(`   - POST /api/auth/verify-code (Admin)`);
       console.log(`   - POST /api/auth/login (Cashier)`);
       console.log(`   - GET  /api/transactions/reports/optimized (NEW - replaces 5 endpoints)`);
+      console.log(`   - GET  /api/transactions/analysis/cashier-daily (NEW - enhanced credit integration)`);
       console.log(`   - GET  /api/transactions/reports/comprehensive`);
       console.log(`   - GET  /api/transactions/reports/sales-summary`);
       console.log(`   - GET  /api/transactions/reports/product-performance`);
       console.log(`   - GET  /api/transactions/reports/cashier-performance`);
       console.log(`   - GET  /api/transactions/stats/cashier-daily`);
       console.log(`   - GET  /api/transactions/stats/daily-sales`);
-      console.log(`   - POST /api/credits`);
+      console.log(`   - POST /api/credits (Enhanced with shop classification)`);
+      console.log(`   - GET  /api/credits/cashier-summary (NEW)`);
+      console.log(`   - GET  /api/credits/cashier-daily (NEW)`);
       console.log(`   - GET  /api/health`);
       console.log('='.repeat(50));
     });
